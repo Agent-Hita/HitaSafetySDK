@@ -203,6 +203,48 @@ class FinancialScamDetectorTest {
         assertEquals(RiskLevel.NONE, result.riskLevel)
     }
 
+    // ── Regression: bare acronyms must not match inside ordinary words ─────────
+    // Real false positive (2026-08-27): a forwarded school grant email scored
+    // FINANCIAL_SCAM HIGH because "irs" matched inside "First priority" via a
+    // plain substring check — not because "IRS" was actually mentioned.
+
+    @Test
+    fun theWordFirstDoesNotTriggerIrsAuthorityClaim() {
+        val result = detector.analyze(
+            "First priority: start the application and request the letter of endorsement ASAP."
+        )
+        assertTrue(result.signals.none { it.signal == "authority_claim" })
+    }
+
+    @Test
+    fun schoolGrantEmailWithSignaturePhoneDoesNotScoreHigh() {
+        val result = detector.analyze(
+            """
+            OCDE Classified Employee Grant - Next Steps
+            She qualify for this grant, so she can move forward with the application.
+            1. Grant Amount: Up to ${'$'}3,500 per school year.
+            2. Deadline: Friday, September 18, 2026.
+            First priority: Start the application and request the Letter of Endorsement
+            from your site administrator ASAP so we don't wait until the deadline.
+            For questions:
+            Leslie Bubb - OCDE
+            lbubb@ocde.us
+            (714) 327-8186
+            """.trimIndent()
+        )
+        // 0.85 is RiskScorer's real adult HIGH threshold (the one that actually
+        // gates a guardian email) — the detector's own internal HIGH cutoff
+        // (0.55) is lower and not what production behavior depends on. Before
+        // the fix, the bogus "irs" match alone pushed this to 0.883.
+        assertTrue(result.score < 0.85f)
+    }
+
+    @Test
+    fun realIrsMentionStillTriggersAuthorityClaim() {
+        val result = detector.analyze("This is the IRS. You owe back taxes.")
+        assertTrue(result.signals.any { it.signal == "authority_claim" && it.matchedPhrase == "irs" })
+    }
+
     // ── Category and signal metadata ──────────────────────────────────────────
 
     @Test

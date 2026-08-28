@@ -60,10 +60,16 @@ class FinancialScamDetector : PatternMatcher {
         "your payment", "process your payment", "submit payment"
     )
 
+    // Bare acronyms — matched separately with word boundaries (see authorityAcronymPattern)
+    // since a plain .contains() check on 3-letter strings hits ordinary words, e.g. "irs"
+    // inside "First". Real-world false positive: a school grant email's "First priority"
+    // line was scored as an IRS-impersonation authority claim.
+    private val authorityAcronymSignals = listOf("irs", "fbi", "dea", "dhs")
+
     private val authoritySignals = listOf(
         // Federal agencies
-        "irs", "internal revenue service", "social security administration",
-        "medicare", "medicaid", "fbi", "federal bureau", "dea ", "dhs ",
+        "internal revenue service", "social security administration",
+        "medicare", "medicaid", "federal bureau",
         "department of homeland", "customs and border",
         // Generic government impersonation
         "department of", "dept of", "dept.", "division of", "bureau of",
@@ -137,6 +143,9 @@ class FinancialScamDetector : PatternMatcher {
         }
         authoritySignals.forEach { signal ->
             if (lower.contains(normalizeContractions(signal))) matches.add(SignalMatch("authority_claim", signal, 0.7f))
+        }
+        authorityAcronymSignals.forEach { signal ->
+            if (Regex("\\b${signal}\\b").containsMatchIn(lower)) matches.add(SignalMatch("authority_claim", signal, 0.7f))
         }
         isolationSignals.forEach { signal ->
             if (lower.contains(normalizeContractions(signal))) matches.add(SignalMatch("isolation", signal, 0.6f))
