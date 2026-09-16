@@ -1,0 +1,296 @@
+package com.agenthita.sdk.detection
+
+/**
+ * Detects financial scam patterns: urgency + payment method + authority claim + isolation.
+ * Covers romance scams, elder fraud, IRS/bank/government impersonation, crypto coercion,
+ * phishing links, and fake bill/debt collection messages.
+ */
+class FinancialScamDetector : PatternMatcher {
+
+    override val category = HarmCategory.FINANCIAL_SCAM
+
+    companion object {
+        // Matches phone numbers: optional +country code, then 7–15 digits optionally
+        // separated by spaces, dashes, or dots. Anchored by word boundaries so it
+        // does not fire on long numeric strings like order IDs or zip codes.
+        // Examples matched: 70369258  +1-800-555-0199  (206) 555-0142  +44 7700 900123
+        private val PHONE_NUMBER_REGEX = Regex(
+            """(\+\d{1,3}[\s\-.]?)?\(?\d{2,4}\)?[\s\-.]?\d{3,4}[\s\-.]?\d{3,4}"""
+        )
+    }
+
+    private val prizeScamSignals = listOf(
+        "you've won", "you have won", "you are the winner", "you've been selected as winner",
+        "claim your prize", "claim your reward", "claim your winnings",
+        "lottery winner", "you won the lottery", "lucky winner",
+        "collect your prize", "prize money", "jackpot winner"
+    )
+
+    private val urgencySignals = listOf(
+        "right now", "immediately", "today only", "expires today",
+        "limited time", "act now", "urgent", "time sensitive",
+        "within 24 hours", "in the next 24 hours", "in the next 48 hours",
+        "within 48 hours", "within the next 24", "within the next 48",
+        "by end of day", "asap", "as soon as possible",
+        "do not delay", "hurry", "last chance", "before it is too late",
+        "account will be closed", "final notice", "immediate action",
+        "action required", "respond immediately", "failure to respond",
+        "your account will be", "must be paid", "pay immediately",
+        "overdue", "past due", "payment overdue",
+        "late fee", "late fees", "avoid late", "penalty fee", "tax penalty",
+        "fees and penalties", "avoid penalties", "to avoid fees",
+        "to avoid charges", "failure to pay", "failure to act"
+    )
+
+    private val paymentSignals = listOf(
+        // Explicit payment methods
+        "gift card", "gift cards", "google play card", "apple gift card",
+        "itunes card", "steam card", "crypto", "bitcoin", "ethereum",
+        "bank account details", "bank details", "account details",
+        "wire transfer", "western union", "moneygram", "money gram",
+        "zelle", "cash app", "venmo", "paypal", "send money",
+        "send me the money", "send the money", "wire funds", "transfer funds",
+        "bank transfer", "routing number", "pay me",
+        // Bill / balance language
+        "pay your bill", "pay the bill", "your bill", "bill payment",
+        "outstanding balance", "amount due", "amount owed",
+        "make a payment", "complete payment", "payment required",
+        "pay now", "pay online", "settle your", "clear your balance",
+        "click to pay", "tap to pay", "unpaid balance", "balance due",
+        "your payment", "process your payment", "submit payment"
+    )
+
+    // Bare acronyms — matched separately with word boundaries (see authorityAcronymPattern)
+    // since a plain .contains() check on 3-letter strings hits ordinary words, e.g. "irs"
+    // inside "First". Real-world false positive: a school grant email's "First priority"
+    // line was scored as an IRS-impersonation authority claim.
+    private val authorityAcronymSignals = listOf("irs", "fbi", "dea", "dhs")
+
+    private val authoritySignals = listOf(
+        // Federal agencies
+        "internal revenue service", "social security administration",
+        "medicare", "medicaid", "federal bureau",
+        "department of homeland", "customs and border",
+        // Generic government impersonation
+        "department of", "dept of", "dept.", "division of", "bureau of",
+        "ministry of", "office of", "commissioner of",
+        "government agency", "federal agency", "state agency",
+        "official notice", "government notice", "legal notice",
+        "licensing", "license board", "license renewal",
+        "tax authority", "revenue service", "tax office",
+        // Financial institution impersonation
+        "your bank", "your account is", "account suspended",
+        "account locked", "account has been", "bank security",
+        // Legal threat language
+        "police", "warrant", "arrest", "legal action",
+        "you owe", "you owe taxes", "owe taxes", "unpaid taxes",
+        "tax debt", "back taxes", "tax bill", "outstanding taxes",
+        "debt collector", "collection agency", "lawsuit filed", "court order",
+        "failure to comply", "law enforcement",
+        // Phone-based scam demands (IRS/government impersonators always ask you to call)
+        "call us at", "call us on", "call this number", "call our number",
+        "please call", "call immediately", "call now to", "call to resolve",
+        "call to avoid", "call to prevent", "contact us at", "reach us at"
+    )
+
+    // Phrases indicating the sender is sharing information rather than making a demand.
+    // Used to suppress phone_number_demand when a numeric ID (tax, EIN, SSN) is shared
+    // in a document-forwarding context and no authority/urgency signals corroborate a scam.
+    private val providingContextSignals = listOf(
+        "here is", "here's", "here are",
+        "i am sharing", "i am sending",
+        "i have sent", "i have attached", "i have included", "i have forwarded",
+        "please find",
+        "for your reference", "for your information",
+        "as requested", "as discussed",
+        "attached is", "attaching"
+    )
+
+    // Victim-voiced refusal or hesitancy in response to a money request —
+    // the request itself is never visible to a response-only caller (a
+    // keyboard extension structurally can't see the [CONTACT] side), so
+    // these catch the *reply* as evidence a solicitation happened, even
+    // though refusing is the safe outcome. Added 2026-09-10 after "I cannot
+    // send you the money. You should try to understand" scored NONE end to
+    // end (no attacker-voiced phrase, and the classifier read the isolated
+    // reply as benign) — matches the same "response reveals an unseen
+    // interaction" pattern the sextortion refusal signals below cover.
+    // Deliberately weighted like isolation/authority_claim (single match
+    // alone lands at LOW/CAUTION, not MEDIUM/HIGH on its own) — a refusal is
+    // still evidence worth surfacing, not a guardian-alert-worthy event by
+    // itself.
+    private val moneyRefusalSignals = listOf(
+        "i cannot send you the money", "i can't send you the money",
+        "i cannot send you money", "i can't send you money",
+        "i will not send you the money", "i won't send you the money",
+        "i will not send you money", "i won't send you money",
+        "i cannot send the money", "i can't send the money",
+        "i am not sending you money", "i'm not sending you money",
+        "i am not sending you the money", "i'm not sending you the money",
+        "i cannot give you the money", "i can't give you the money",
+        "i will not lend you money", "i won't lend you money",
+        "i cannot lend you money", "i can't lend you money",
+        // Hesitancy, not just flat refusal
+        "i am not comfortable sending you money", "i'm not comfortable sending you money",
+        "i do not feel comfortable sending money", "i don't feel comfortable sending money",
+        "i am not sure i should send you money", "i'm not sure i should send you money",
+        "i do not think i should send you money", "i don't think i should send you money",
+        "not sure if i should send you money", "not sure if i should send the money",
+        "i need to think about sending you money", "let me think about sending you money",
+        "i am hesitant to send you money", "i'm hesitant to send you money"
+    )
+
+    // Victim-voiced agreement/compliance to send money — the mirror image of
+    // moneyRefusalSignals just above. A response-only caller never sees the
+    // attacker's ask, only this reply, so agreeing to send money is the only
+    // visible evidence a solicitation happened AND that the person is
+    // complying with it — a materially worse signal than a refusal.
+    //
+    // A general "I <sending verb> ... <money noun>" pattern rather than an
+    // exact-phrase list — covers "i will send you the money", "i can wire
+    // her cash", "i'm sending him the gift card money", etc. without needing
+    // to enumerate every wording. Bounded gaps (at most 3 words between "i"
+    // and the verb, at most 4 between the verb and the money noun) keep it
+    // from matching across unrelated clauses in a longer message.
+    private val moneyComplianceVerbs = listOf(
+        "send", "sent", "sending",
+        "give", "gave", "giving",
+        "wire", "wired", "wiring",
+        "transfer", "transferred", "transferring",
+        "venmo", "zelle"
+    )
+    private val moneyComplianceNouns = listOf("money", "cash", "funds", "gift card", "giftcard")
+
+    private val moneyComplianceRegex = Regex(
+        "\\bi\\b(?:\\s+\\S+){0,3}\\s+(?:${moneyComplianceVerbs.joinToString("|")})\\b" +
+        "(?:\\s+\\S+){0,4}\\s+(?:${moneyComplianceNouns.joinToString("|")})\\b"
+    )
+
+    private val isolationSignals = listOf(
+        "do not tell your family", "do not tell anyone",
+        "keep this between us", "do not discuss this with anyone",
+        "this is confidential", "do not inform anyone",
+        "do not mention this to", "your family will not understand",
+        "they will only make it worse", "do not contact your bank",
+        "do not speak to anyone"
+    )
+
+    // URLs or link patterns commonly used in phishing / smishing.
+    // Bare "http://" and "https://" are intentionally excluded — any legitimate
+    // invite or business message can contain a URL. Only specific path patterns
+    // (payment, verify, etc.) and URL shorteners are treated as suspicious.
+    private val suspiciousLinkSignals = listOf(
+        "click here", "click the link", "tap the link",
+        "follow this link", "visit this link", "open this link",
+        ".com/payment", ".net/payment", ".org/payment",
+        ".com/pay", ".net/pay", ".com/verify", ".com/account",
+        ".com/secure", ".com/update", "bit.ly/", "tinyurl.com/",
+        "t.co/", "goo.gl/"
+    )
+
+    override fun analyze(text: String): DetectionResult {
+        val lower = normalizeContractions(text.lowercase())
+        val matches = mutableListOf<SignalMatch>()
+
+        prizeScamSignals.forEach { signal ->
+            if (lower.contains(normalizeContractions(signal))) matches.add(SignalMatch("prize_scam", signal, 0.7f))
+        }
+        urgencySignals.forEach { signal ->
+            if (lower.contains(normalizeContractions(signal))) matches.add(SignalMatch("urgency", signal, 0.5f))
+        }
+        paymentSignals.forEach { signal ->
+            if (lower.contains(normalizeContractions(signal))) matches.add(SignalMatch("payment_method", signal, 0.8f))
+        }
+        moneyRefusalSignals.forEach { signal ->
+            if (lower.contains(normalizeContractions(signal))) matches.add(SignalMatch("money_refusal", signal, 0.65f))
+        }
+        // Excludes a negated match ("i will not send you money") — that's a
+        // refusal, already caught by moneyRefusalSignals above, not compliance.
+        moneyComplianceRegex.find(lower)?.let { match ->
+            val negated = listOf(" not ", "never", "cannot", "wont", "dont").any { match.value.contains(it) }
+            if (!negated) matches.add(SignalMatch("money_send_compliance", match.value, 0.65f))
+        }
+        authoritySignals.forEach { signal ->
+            if (lower.contains(normalizeContractions(signal))) matches.add(SignalMatch("authority_claim", signal, 0.7f))
+        }
+        authorityAcronymSignals.forEach { signal ->
+            if (Regex("\\b${signal}\\b").containsMatchIn(lower)) matches.add(SignalMatch("authority_claim", signal, 0.7f))
+        }
+        isolationSignals.forEach { signal ->
+            if (lower.contains(normalizeContractions(signal))) matches.add(SignalMatch("isolation", signal, 0.6f))
+        }
+        suspiciousLinkSignals.forEach { signal ->
+            if (lower.contains(normalizeContractions(signal))) matches.add(SignalMatch("suspicious_link", signal, 0.6f))
+        }
+
+        // Phone numbers embedded in text are a strong scam signal when combined with
+        // authority/urgency — but numeric tax IDs, EINs, and SSNs share the same format.
+        // Suppress phone_number_demand when the sender is clearly sharing a document AND
+        // no authority/urgency signal corroborates a scam interpretation.
+        if (PHONE_NUMBER_REGEX.containsMatchIn(text)) {
+            val hasProvidingContext = providingContextSignals.any { lower.contains(it) }
+            val hasSupportingSignals = matches.any { it.signal == "authority_claim" || it.signal == "urgency" }
+            if (!hasProvidingContext || hasSupportingSignals) {
+                matches.add(SignalMatch("phone_number_demand", "embedded phone number", 0.7f))
+            }
+        }
+
+        val score = computeScore(matches)
+        return DetectionResult(
+            category = HarmCategory.FINANCIAL_SCAM,
+            riskLevel = scoreToRiskLevel(score),
+            score = score,
+            signals = matches,
+            explanation = buildExplanation(matches)
+        )
+    }
+
+    private fun computeScore(matches: List<SignalMatch>): Float {
+        if (matches.isEmpty()) return 0f
+        val uniqueTypes = matches.map { it.signal }.toSet()
+
+        // Authority + payment = canonical scam combo
+        val comboBonus = if (
+            (uniqueTypes.contains("authority_claim") || uniqueTypes.contains("prize_scam")) &&
+            uniqueTypes.contains("payment_method")
+        ) 0.3f else 0f
+
+        // Suspicious link + authority or payment = phishing/smishing pattern
+        val linkBonus = if (
+            uniqueTypes.contains("suspicious_link") &&
+            (uniqueTypes.contains("authority_claim") || uniqueTypes.contains("payment_method"))
+        ) 0.2f else 0f
+
+        // Phone number + authority/urgency = vishing / IRS-style phone scam
+        val phoneBonus = if (
+            uniqueTypes.contains("phone_number_demand") &&
+            (uniqueTypes.contains("authority_claim") || uniqueTypes.contains("urgency"))
+        ) 0.25f else 0f
+
+        val rawScore = matches.sumOf { it.weight.toDouble() }.toFloat() / 3f
+        return (rawScore + comboBonus + linkBonus + phoneBonus).coerceIn(0f, 1f)
+    }
+
+    private fun scoreToRiskLevel(score: Float) = when {
+        score >= 0.55f -> RiskLevel.HIGH
+        score >= 0.28f -> RiskLevel.MEDIUM
+        score >= 0.12f -> RiskLevel.LOW
+        else           -> RiskLevel.NONE
+    }
+
+    private fun normalizeContractions(text: String) = text
+        .replace("i'll", "i will")
+        .replace("don't", "do not")
+        .replace("won't", "will not")
+        .replace("can't", "cannot")
+        .replace("you'll", "you will")
+        .replace("i've", "i have")
+        .replace("i'm", "i am")
+
+    private fun buildExplanation(matches: List<SignalMatch>): String {
+        if (matches.isEmpty()) return "No financial scam signals detected."
+        val types = matches.map { it.signal }.toSet()
+        return "Detected financial scam indicators: ${types.joinToString(", ")}. " +
+               "This conversation shows patterns associated with scams or financial coercion."
+    }
+}

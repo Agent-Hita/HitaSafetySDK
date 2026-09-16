@@ -1,0 +1,3 @@
+[submodule "android-gemma-classifier"]
+	path = android-gemma-classifier
+	url = https://github.com/Agent-Hita/ModelHints.git
