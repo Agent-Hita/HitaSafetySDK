@@ -21,14 +21,26 @@ class AdultContentDetector : PatternMatcher {
     // "best website to search for porn" — because "porn" wasn't part of any
     // listed phrase. Safe as a bare word: unlike "explosive" or "bomb",
     // these terms have essentially no innocent everyday usage.
+    //
+    // "xxx" is deliberately absent: it's everyday sign-off kisses
+    // ("love you xxx"), and a false alarm on a CHILD account emails the
+    // guardian.
     private val explicitBareWordSignals = listOf(
-        "porn", "pornhub", "xvideos", "xnxx", "onlyfans", "hentai"
+        "porn", "pornhub", "xvideos", "xnxx", "onlyfans", "hentai",
+        "nudes", "nsfw", "rule34", "chaturbate", "brazzers", "camgirl", "camgirls"
     )
 
+    // Was exact forms only ("naked pics of"), so ordinary rewordings
+    // slipped through — a real on-device miss: "adult content free online
+    // naked pictures girls" (2026-11-09). Bare "adult content" stays out:
+    // "this movie has adult content" is ordinary.
     private val explicitSearchSignals = listOf(
-        "nude pics of", "nude photos of", "naked pics of", "naked photos of",
-        "sex video", "sex videos", "sex tape",
-        "adult video site", "adult content site"
+        "naked pictures", "naked pics", "naked photos", "naked videos",
+        "nude pictures", "nude pics", "nude photos", "nude videos",
+        "naked girls", "naked boys", "naked women", "naked men", "nude girls", "nude boys",
+        "sex video", "sex videos", "sex tape", "sex pics", "sex chat",
+        "adult video site", "adult content site", "adult content sites", "free adult content",
+        "adult content online", "adult sites"
     )
 
     override fun analyze(text: String): DetectionResult {

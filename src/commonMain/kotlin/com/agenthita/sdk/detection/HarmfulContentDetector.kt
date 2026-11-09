@@ -51,6 +51,36 @@ class HarmfulContentDetector : PatternMatcher {
         "how to make fentanyl", "how to synthesize fentanyl"
     )
 
+    // Bringing a weapon to school, getting a gun around the rules, and
+    // other plain how-to/threat phrasings the patterns above missed
+    // (2026-11-09). "where to buy a gun" / "how to get a gun" are left out
+    // on purpose: they also match "...a gun safe" and "...a gun license".
+    private val schoolWeaponThreatSignals = listOf(
+        "bring a gun to school", "bring a knife to school",
+        "shoot up the school", "shoot up my school"
+    )
+
+    private val weaponAcquisitionSignals = listOf(
+        "buy a gun without", "untraceable gun"
+    )
+
+    private val explosiveExtraSignals = listOf(
+        "make something explode", "homemade explosive", "how to make a bomb"
+    )
+
+    private val harmOthersSignals = listOf(
+        "how to poison someone", "how to stab someone", "how to hurt someone without"
+    )
+
+    // Suicide, filed here at Femina's request (2026-11-09) until it has a
+    // category of its own. "suicide" as a whole word, but not titles,
+    // prevention material, or the "suicides" running drill (the plural
+    // never matches the word boundary) — a CHILD-account false alarm
+    // emails the guardian.
+    private val suicideRegex = Regex(
+        "\\bsuicide\\b(?!\\s+(?:squad|prevention|awareness|hotline|lifeline|rates?)\\b)"
+    )
+
     private val violenceInstructionSignals = listOf(
         "how to hurt someone and not get caught", "how to kill someone and not get caught",
         "untraceable poison", "undetectable poison"
@@ -72,6 +102,21 @@ class HarmfulContentDetector : PatternMatcher {
         violenceInstructionSignals.forEach { signal ->
             if (lower.contains(signal)) matches.add(SignalMatch("violence_instructions", signal, 0.9f))
         }
+        schoolWeaponThreatSignals.forEach { signal ->
+            if (lower.contains(signal)) matches.add(SignalMatch("school_weapon_threat", signal, 0.9f))
+        }
+        weaponAcquisitionSignals.forEach { signal ->
+            if (lower.contains(signal)) matches.add(SignalMatch("weapons_explosives", signal, 0.9f))
+        }
+        explosiveExtraSignals.forEach { signal ->
+            if (lower.contains(signal)) matches.add(SignalMatch("weapons_explosives", signal, 0.9f))
+        }
+        harmOthersSignals.forEach { signal ->
+            if (lower.contains(signal)) matches.add(SignalMatch("violence_instructions", signal, 0.9f))
+        }
+        suicideRegex.find(lower)?.let { match ->
+            matches.add(SignalMatch("self_harm", match.value, 0.9f))
+        }
 
         val score = if (matches.isEmpty()) 0f else 1f
         return DetectionResult(
@@ -86,6 +131,7 @@ class HarmfulContentDetector : PatternMatcher {
     private fun buildExplanation(matches: List<SignalMatch>): String {
         if (matches.isEmpty()) return "No harmful content signals detected."
         val types = matches.map { it.signal }.toSet()
+        if (types == setOf("self_harm")) return "Detected a statement or search about suicide."
         return "Detected a search or statement about dangerous, violence-enabling content: ${types.joinToString(", ")}."
     }
 }
