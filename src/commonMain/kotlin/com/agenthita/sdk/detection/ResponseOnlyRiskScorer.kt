@@ -167,18 +167,7 @@ class ResponseOnlyRiskScorer(
         // own medium threshold (0.65) even though it's well above the flat
         // 0.28 the detector's own internal scoreToRiskLevel uses. Confirmed
         // via NewContentCategoriesScorerTest failing exactly this way.
-        val ageGatedNewCategories: Map<HarmCategory, DetectionResult> = otpEscalated.mapValues { (cat, result) ->
-            if (cat != HarmCategory.ADULT_CONTENT && cat != HarmCategory.HARMFUL_CONTENT) return@mapValues result
-            if (result.riskLevel == RiskLevel.NONE) return@mapValues result
-            when (userCategory) {
-                UserCategory.SELF_PROTECTING_ADULT, UserCategory.VULNERABLE_ADULT ->
-                    result.copy(riskLevel = RiskLevel.NONE, score = 0f)
-                UserCategory.ADOLESCENT ->
-                    if (cat == HarmCategory.ADULT_CONTENT) result.copy(riskLevel = RiskLevel.MEDIUM, score = 0.30f)
-                    else result
-                UserCategory.CHILD -> result
-            }
-        }
+        val ageGatedNewCategories: Map<HarmCategory, DetectionResult> = applyNewCategoryAgePolicy(otpEscalated)
 
         // A CHILD or ADOLESCENT agreeing to send money is floored on the
         // rules signal alone — never gated behind the classifier, which has
@@ -262,7 +251,12 @@ class ResponseOnlyRiskScorer(
             }
         }
 
-        return finalResults.values.filter { it.riskLevel != RiskLevel.NONE }
+        // The age policy for ADULT_CONTENT/HARMFUL_CONTENT runs again here
+        // because the classifier can now return those categories too
+        // (2026-11-09), and its verdict is merged after the first pass —
+        // without this, an AI-only ADULT_CONTENT verdict would warn an adult
+        // account.
+        return applyNewCategoryAgePolicy(finalResults).values.filter { it.riskLevel != RiskLevel.NONE }
     }
 
     /**
@@ -285,6 +279,25 @@ class ResponseOnlyRiskScorer(
         val text = keepNewest("[USER]: $message", MAX_INPUT_LENGTH)
         return detectors.any { it.analyze(text).signals.isNotEmpty() }
     }
+
+    /**
+     * ADULT_CONTENT/HARMFUL_CONTENT per-age-band policy: none for adult
+     * accounts, ADULT_CONTENT capped to MEDIUM for ADOLESCENT, unchanged
+     * for CHILD. See the comment at its first use in [score].
+     */
+    private fun applyNewCategoryAgePolicy(results: Map<HarmCategory, DetectionResult>): Map<HarmCategory, DetectionResult> =
+        results.mapValues { (cat, result) ->
+            if (cat != HarmCategory.ADULT_CONTENT && cat != HarmCategory.HARMFUL_CONTENT) return@mapValues result
+            if (result.riskLevel == RiskLevel.NONE) return@mapValues result
+            when (userCategory) {
+                UserCategory.SELF_PROTECTING_ADULT, UserCategory.VULNERABLE_ADULT ->
+                    result.copy(riskLevel = RiskLevel.NONE, score = 0f)
+                UserCategory.ADOLESCENT ->
+                    if (cat == HarmCategory.ADULT_CONTENT) result.copy(riskLevel = RiskLevel.MEDIUM, score = 0.30f)
+                    else result
+                UserCategory.CHILD -> result
+            }
+        }
 
     /** Duplicated verbatim from RiskScorer — see this file's header comment. */
     private fun mergeClassifierResult(ruleResult: DetectionResult, classifierSeverity: RiskLevel): DetectionResult {
